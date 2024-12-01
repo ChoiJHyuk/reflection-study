@@ -2,6 +2,8 @@ package annotations.example;
 
 import annotations.example.annotation.InitializerClass;
 import annotations.example.annotation.InitializerMethod;
+import annotations.example.annotation.RetryOperation;
+import annotations.example.annotation.ScanPackages;
 
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
@@ -12,15 +14,23 @@ import java.nio.file.*;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 
+@ScanPackages({"app", "app.configs", "app.databases", "app.http"})
 public class Main {
 
     public static void main(String[] args) throws Throwable {
-        initialize("app", "app.configs",
-                "app.databases", "app.http");
+        initialize();
     }
 
-    public static void initialize(String... packageNames) throws NoSuchMethodException, IllegalAccessException, InvocationTargetException, InstantiationException, ClassNotFoundException, IOException, URISyntaxException {
+    public static void initialize() throws Throwable {
+        ScanPackages annotation = Main.class.getAnnotation(ScanPackages.class);
+        String[] packageNames = annotation.value();
+
+        if (packageNames == null || packageNames.length == 0) {
+            return;
+        }
+
         List<Class<?>> classes = getAllClasses(packageNames);
 
         for (Class<?> clazz : classes) {
@@ -33,7 +43,33 @@ public class Main {
             Object instance = clazz.getDeclaredConstructor().newInstance();
 
             for (Method method : methods) {
+                callIntializingMethod(instance, method);
+            }
+        }
+    }
+
+    private static void callIntializingMethod(Object instance, Method method) throws Throwable {
+        RetryOperation annotation = method.getAnnotation(RetryOperation.class);
+
+        int numberOfRetries = annotation == null ? 0 : annotation.numberOfRetries();
+
+        while (true) {
+            try {
                 method.invoke(instance);
+                break;
+            } catch (InvocationTargetException e) {
+                Throwable targetException = e.getTargetException();
+
+                if (numberOfRetries > 0 && Set.of(annotation.retryExceptions()).contains(targetException.getClass())) {
+                    numberOfRetries--;
+
+                    System.out.println("Retrying...");
+                    Thread.sleep(annotation.durationBetweenRetriesMs());
+                } else if (annotation != null) {
+                    throw new RuntimeException(annotation.failureMessage(), targetException);
+                } else {
+                    throw targetException;
+                }
             }
         }
     }
@@ -92,7 +128,7 @@ public class Main {
                         fileName.replaceFirst("\\.class$", "")
                         : packageName + "." + fileName.replaceFirst("\\.class$", "");
                 System.out.println(classFullName);
-                Class<?> clazz = Class.forName("annotations.example."+classFullName);
+                Class<?> clazz = Class.forName("annotations.example." + classFullName);
                 classes.add(clazz);
             }
         }
